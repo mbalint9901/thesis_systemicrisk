@@ -1,0 +1,1293 @@
+---
+title: "Using advanced machine learning methods to measure sytemic risk and uncertainity"
+author: "Granát Marcell és Mazzag Bálint"
+date: \today
+output: 
+  pdf_document: 
+    fig_caption: yes
+    toc: yes
+    toc_depth: 4
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{natbib}
+- \pagestyle{fancy}
+- \fancyhf{}
+- \fancyhead[RE,LO]{\leftmark}
+- \fancyfoot[C]{\thepage}
+- \usepackage{lscape}
+- \usepackage{pdfpages}
+- \usepackage{titling}
+editor_options: 
+  chunk_output_type: console
+---
+
+\pagebreak
+
+\renewcommand{\abstractname}{Absztrakt}
+
+```{=tex}
+\begin{abstract}
+In this paper, I combine four popular financial systemic risk measures with two main machine learning methods (PCA and PLS) in order to provide a stable ranking of financial institutions. The empirical results show a significant decrease in variation amongst the institutions’ rankings, showing that these combinations are more reliable and more suitable for macroprudential supervision. Out of these rankings, the PLS method is less common in financial literature, however, it could be more effective. Additionally, I show whether the combination of rankings has an early warning indicator effect on macroeconomic shocks. The final aim of this paper is to help prevent severe financial shocks in the future.
+\end{abstract}
+```
+
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(ggplot2)
+library(janitor)
+library(stats)
+library(ggpmisc)
+library(lubridate)
+library(pls)
+library(wesanderson)
+library(viridis)
+library(stargazer)
+```
+
+
+```{r theMESet}
+ggplot2::reset_theme_settings()
+theme_set(theme_gray())
+```
+
+
+```{r loading_variables}
+DCoVaR <- readxl::read_excel("ResultCrossSectional.xlsx", sheet="Delta CoVaR (K=95%)")
+MES <- readxl::read_excel("ResultCrossSectional.xlsx", sheet="MES (K=95%)")
+SRISK <- readxl::read_excel("ResultCrossSectional.xlsx", sheet="SRISK (D=60%, CAR=8%)")
+betaMV <- readxl::read_excel("ResultCrossSectional.xlsx", sheet="Beta")
+SpilloverFrom <- readxl::read_excel("ResultSpillover.xlsx", sheet="From (G, H=4, LAGS=2)")
+spillover_to <- readxl::read_excel("ResultSpillover.xlsx", sheet="To (G, H=4, LAGS=2)")
+spillover_net <- readxl::read_excel("ResultSpillover.xlsx", sheet="Net (G, H=4, LAGS=2)")
+shares <- readxl::read_excel("New_data_new.xlsx", sheet = "Shares")
+liabilities <- readxl::read_excel("New_data_new.xlsx", sheet = "Assets")
+market_caps <- readxl::read_excel("New_data_new.xlsx", sheet = "Capitalizations")
+
+betaMV <- betaMV %>% select(-Date)*(market_caps[2:nrow(market_caps),2:ncol(market_caps)])
+
+
+inst_analysed <- as.vector(colnames(SpilloverFrom))
+inst_analysed <- inst_analysed[2:length(inst_analysed)]
+#inst_analysed <- inst_analysed[2:15]
+nr_inst <- length(inst_analysed)
+#nr_inst <- 14
+var_list_long <- c("DCoVaR", "MES", "SRISK", "SpilloverFrom", "spillover_to", "spillover_net", "shares")
+var_list <- c("DCoVaR", "MES", "SRISK", "SpilloverFrom", "spillover_to", "spillover_net")
+var_list_short <- c("DCoVaR", "MES", "SRISK", "SpilloverFrom")
+
+shares  %<>% select(Date, "SPX", inst_analysed) %>% 
+  mutate(Date = lubridate::ymd(Date)) %>% 
+  add_column(Variable=as.character(substitute(shares)), .before = "Date")
+n <- length(shares$SPX)
+
+returns <- ((shares[2:n, 4:ncol(shares)] - shares[1:(n-1), 4:ncol(shares)])/shares[1:(n-1), 4:ncol(shares)])
+returns <- cbind((shares[2:n, 2]), returns)
+returns <- cbind(shares[2:n, 1], returns)
+
+
+DCoVaR  %<>% select(Date, inst_analysed) %>% 
+  add_column(Variable=as.character(substitute(DCoVaR)), .before = "Date")
+
+MES  %<>% select(Date, inst_analysed) %>% 
+  add_column(Variable=as.character(substitute(MES)), .before = "Date")
+
+SRISK  %<>% select(Date, inst_analysed) %>% 
+  add_column(Variable=as.character(substitute(SRISK)), .before = "Date")
+
+SpilloverFrom  %<>% select(Date, inst_analysed) %>% 
+  add_column(Variable=as.character(substitute(SpilloverFrom)), .before = "Date")
+
+spillover_to  %<>% select(Date, inst_analysed) %>% 
+  add_column(Variable=as.character(substitute(spillover_to)), .before = "Date")
+
+spillover_net  %<>% select(Date, inst_analysed) %>% 
+  add_column(Variable=as.character(substitute(spillover_net)), .before = "Date")
+
+liabilities  %<>% select(Date, inst_analysed) %>% 
+  add_column(Variable=as.character(substitute(liabilities)), .before = "Date")
+
+market_caps  %<>% select(Date, inst_analysed) %>% 
+  add_column(Variable=as.character(substitute(market_caps)), .before = "Date")
+
+all_data <- rbind(DCoVaR, MES, SRISK, spillover_to, SpilloverFrom, spillover_net)
+all_data %<>% 
+  mutate(
+    Date = lubridate::dmy(Date)
+  ) %>% 
+  filter(Date < "2019-10-01", Date > "2002-04-01")
+date_list <- as.Date(as.numeric(as.vector(all_data %>% pull(Date) %>% unique())), origin = "1970-01-01")
+first_chill_period <- as.data.frame(date_list) %>% filter(date_list < "2006-01-01" ) %>% pull()
+pre_crisis_period <- as.data.frame(date_list) %>% filter(date_list >= "2006-01-01" & date_list < "2007-07-01") %>% pull()
+crisis_period <- as.data.frame(date_list) %>% filter(date_list >= "2007-07-01" & date_list < "2009-07-01") %>% pull()
+pre_debt_crisis_period <- as.data.frame(date_list) %>% filter(date_list >= "2009-07-01" & date_list < "2009-11-01") %>% pull()
+debt_crisis_period <- as.data.frame(date_list) %>% filter(date_list >= "2009-11-01" & date_list < "2012-08-01") %>% pull()
+second_chill_period <- as.data.frame(date_list) %>% filter(date_list >= "2012-08-01") %>% pull()
+l <- list(date_list, first_chill_period, pre_crisis_period, crisis_period,pre_debt_crisis_period, debt_crisis_period, second_chill_period)
+month_list <- all_data %>% mutate(month = as.numeric(paste(year(Date), month(Date), sep = ""))) %>% distinct(month, .keep_all =TRUE) %>% pull(Date)
+```
+
+```{r}
+SpilloverFrom %>% 
+  reshape2::melt(id.vars = c("Variable", "Date")) %>% 
+  mutate(Date = lubridate::dmy(Date)) %>% 
+  ggplot(aes(x = Date, y = value)) +
+  annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-07-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+  geom_line() +
+  facet_wrap(~variable, ncol = 6)
+```
+
+
+
+```{r table_descriptive_stats}
+#returns  %>% filter(Date %in% crisis_period)
+
+stargazer(returns %>% select(-Date), summary.stat = c("mean", "sd"))
+summary(returns %>% select(-Date))
+
+stargazer(as.data.frame(liabilities %>% select(-Date)), summary.stat = c("mean", "sd"))
+stargazer(as.data.frame(market_caps %>% select(-Date)), summary.stat = c("mean", "sd"))
+```
+
+
+```{r from_all_data_to_ranking}
+all_data_ranking <- as.data.frame(matrix(ncol = nr_inst))
+
+for (i in 1:nrow(all_data)){
+  all_data_ranking <- rbind(all_data_ranking, nr_inst+1-rank(all_data[i,3:(nr_inst+2)], ties.method = "max"))
+}
+
+all_data_ranking <- (1 - all_data_ranking/(length(inst_analysed)+1))
+
+all_data_ranking <- cbind(all_data[,1:2], all_data_ranking[-1,])
+colnames(all_data_ranking) <- c("Variable", "Date", inst_analysed)
+```
+
+
+```{r select_monthly_data}
+#First occurence of every month
+
+all_data_monthly_1 <- all_data %>% 
+  filter(Date %in% month_list)
+
+all_data_ranking_monthly_1 <- all_data_ranking %>% 
+  filter(Date %in% month_list)
+
+
+#Monthly average of measure and then ranking
+
+all_data_monthly_2 <- all_data %>% 
+  mutate(month = as.numeric(paste(year(Date), month(Date), sep = ""))) %>%
+  group_by(Variable, month) %>% 
+  summarise_at(inst_analysed, mean, na.rm = TRUE) %>% 
+  cbind(Date = rep(month_list, 6),.) %>% 
+  select(-month) %>% 
+  relocate(Variable, .before = Date)
+
+all_data_ranking_monthly_2 <- as.data.frame(matrix(ncol = nr_inst))
+
+for (i in 1:nrow(all_data_monthly_2)){
+  all_data_ranking_monthly_2 <- rbind(all_data_ranking_monthly_2, nr_inst+1-rank(all_data_monthly_2[i,3:(nr_inst+2)], ties.method = "max"))
+}
+
+all_data_ranking_monthly_2 <- cbind(all_data_monthly_2[,1:2], all_data_ranking_monthly_2[-1,])
+colnames(all_data_ranking_monthly_2) <- c("Variable", "Date", inst_analysed)
+
+#Monthly average of ranking
+
+all_data_ranking_monthly_3 <- all_data_ranking %>% 
+  mutate(month = as.numeric(paste(year(Date), month(Date), sep = ""))) %>%
+  group_by(Variable, month) %>% 
+  summarise_at(inst_analysed, mean, na.rm = TRUE) %>% 
+  cbind(Date = rep(month_list, 6),.) %>% 
+  select(-month) %>% 
+  relocate(Variable, .before = Date)
+
+#Choosing final version
+
+all_data_ranking_monthly <- all_data_ranking_monthly_2
+all_data_ranking_monthly[,3:ncol(all_data_ranking_monthly)] <- 1-(all_data_ranking_monthly[,3:ncol(all_data_ranking_monthly)]/(1+length(inst_analysed)))
+```
+
+```{r pca_data}
+loadings_firstcomp <- data.frame(matrix(ncol = 4))
+loadings_secondcomp <- data.frame(matrix(ncol = 4))
+scores_firstcomp <- data.frame(matrix(ncol = nr_inst))
+scores_secondcomp <- data.frame(matrix(ncol = nr_inst))
+exp_variances <- data.frame(matrix(ncol = 4))
+
+
+for (i in 1:length(date_list)){
+  df <- as.data.frame(t(all_data_ranking %>% filter(Date == date_list[i]) %>% 
+                          filter(Variable != "shares") %>% 
+                          select(inst_analysed))) %>% 
+    `colnames<-`(var_list) %>% 
+    select(var_list_short) %>%
+    scale()
+  fokomp <- princomp(df)
+  loadings_firstcomp <- rbind(loadings_firstcomp, as.numeric(t(fokomp$loadings[,1])))
+  loadings_secondcomp <- rbind(loadings_secondcomp, as.numeric(t(fokomp$loadings[,2])))
+  scores_firstcomp <- rbind(scores_firstcomp, as.numeric(t(fokomp$scores[,1])))
+  scores_secondcomp <- rbind(scores_secondcomp, as.numeric(t(fokomp$scores[,2])))
+  exp_variances <- rbind(exp_variances, fokomp$sdev^2/sum(fokomp$sdev^2))
+}
+
+summary(fokomp)
+
+loadings_firstcomp <- cbind(loadings_firstcomp[2:nrow(loadings_firstcomp),] %>% `colnames<-`(var_list_short), Date = date_list)
+loadings_secondcomp <- cbind(loadings_secondcomp[2:nrow(loadings_secondcomp),] %>% `colnames<-`(var_list_short), Date = date_list)
+scores_firstcomp <- cbind(scores_firstcomp[2:nrow(scores_firstcomp),] %>% `colnames<-`(inst_analysed), Date = date_list)
+scores_secondcomp <- cbind(scores_secondcomp[2:nrow(scores_secondcomp),] %>% `colnames<-`(inst_analysed), Date = date_list)
+exp_variances <- cbind(exp_variances[2:nrow(exp_variances),], Date = date_list) %>% `colnames<-`(c("PC_1", "PC_2", "PC_3", "PC_4"))
+cum_variances <- as.data.frame(matrixStats::rowCumsums(as.matrix(exp_variances %>% select(-Date)))) %>% `colnames<-`(c("PC_1", "PC_2", "PC_3", "PC_4"))
+
+```
+
+
+```{r pca_monthly_data}
+loadings_firstcomp_month <- data.frame(matrix(ncol = 4))
+loadings_secondcomp_month <- data.frame(matrix(ncol = 4))
+scores_firstcomp_month <- data.frame(matrix(ncol = nr_inst))
+scores_secondcomp_month <- data.frame(matrix(ncol = nr_inst))
+exp_variances_month <- data.frame(matrix(ncol = 4))
+
+
+for (i in 1:length(month_list)){
+  df <- as.data.frame(t(all_data_ranking_monthly %>% filter(Date == month_list[i]) %>% 
+                          filter(Variable != "shares") %>% 
+                          select(inst_analysed))) %>% 
+    `colnames<-`(var_list) %>% 
+    select(var_list_short) %>%
+    scale()
+  fokomp <- princomp(df)
+  loadings_firstcomp_month <- rbind(loadings_firstcomp_month, as.numeric(t(fokomp$loadings[,1])))
+  loadings_secondcomp_month <- rbind(loadings_secondcomp_month, as.numeric(t(fokomp$loadings[,2])))
+  scores_firstcomp_month <- rbind(scores_firstcomp_month, as.numeric(t(fokomp$scores[,1])))
+  scores_secondcomp_month <- rbind(scores_secondcomp_month, as.numeric(t(fokomp$scores[,2])))
+  exp_variances_month <- rbind(exp_variances_month, fokomp$sdev^2/sum(fokomp$sdev^2))
+}
+
+loadings_firstcomp_month <- cbind(loadings_firstcomp_month[2:nrow(loadings_firstcomp_month),] %>% `colnames<-`(var_list_short), Date = month_list)
+loadings_secondcomp_month <- cbind(loadings_secondcomp_month[2:nrow(loadings_secondcomp_month),] %>% `colnames<-`(var_list_short), Date = month_list)
+scores_firstcomp_month <- cbind(scores_firstcomp_month[2:nrow(scores_firstcomp_month),] %>% `colnames<-`(inst_analysed), Date = month_list)
+scores_secondcomp_month <- cbind(scores_secondcomp_month[2:nrow(scores_secondcomp_month),] %>% `colnames<-`(inst_analysed), Date = month_list)
+exp_variances_month <- cbind(exp_variances_month[2:nrow(exp_variances_month),], Date = month_list) %>% `colnames<-`(c("PC_1", "PC_2", "PC_3", "PC_4", "Date"))
+cum_variances_month <- as.data.frame(matrixStats::rowCumsums(as.matrix(exp_variances_month %>% select(-Date)))) %>% `colnames<-`(c("PC_1", "PC_2", "PC_3", "PC_4"))
+
+```
+
+```{r get_average_downturn_and_ranking}
+
+change_returns <- function(x, na.rm=FALSE) (ifelse(x <= -0.025, x, NA))
+
+returns_pls <- returns
+returns_pls <- cbind(returns_pls[,1:2], mutate_all(returns_pls[,3:(nr_inst+2)], change_returns))
+returns_pls %<>% 
+  filter(Date < "2019-10-01", Date > "2002-04-01") %>% 
+  mutate(month = as.numeric(paste(year(Date), month(Date), sep = ""))) %>% 
+  group_by(month) %>% 
+  summarise_at(inst_analysed, mean, na.rm = TRUE)
+#filter(Date %in% month_list)
+
+returns_pls <- data.frame(lapply(returns_pls, function(x) {
+  ifelse(is.nan(x), 0, x)
+}))
+
+returns_pls <- cbind(Date = month_list, returns_pls) %>% 
+  add_column(Variable=as.character(substitute(returns_pls)), .before = "Date") %>% 
+  select(-month)
+
+returns_pls_ranking <- as.data.frame(matrix(ncol = nr_inst))
+
+for (i in 1:nrow(returns_pls)){
+  returns_pls_ranking <- rbind(returns_pls_ranking, rank(returns_pls[i,3:(nr_inst+2)], ties.method = "min"))
+}
+
+returns_pls_ranking <- 1-(returns_pls_ranking/(1+length(inst_analysed)))
+returns_pls_ranking <- cbind(returns_pls[,1:2], returns_pls_ranking[-1,])
+colnames(returns_pls_ranking) <- c("Variable", "Date", inst_analysed)
+```
+
+```{r pls_for_losses}
+lag_order <- 0
+
+month_list <- all_data %>% mutate(month = as.numeric(paste(year(Date), month(Date), sep = ""))) %>% distinct(month, .keep_all =TRUE) %>% pull(Date)
+returns_pls_lagged <- cbind(Date_lagged = month_list[(lag_order+1):length(month_list)], returns_pls_ranking[1:(nrow(returns_pls)-lag_order),])
+
+data_for_pls <- rbind(all_data_ranking_monthly, returns_pls_lagged %>% select(-Date) %>% rename(Date = Date_lagged))
+
+loadings_pls_firstcomp <- data.frame(matrix(ncol = 4))
+loadings_pls_secondcomp <- data.frame(matrix(ncol = 4))
+scores_pls_firstcomp <- data.frame(matrix(ncol = nr_inst))
+scores_pls_secondcomp <- data.frame(matrix(ncol = nr_inst))
+exp_pls_indep_variances <- data.frame(matrix(ncol = 4))
+exp_pls_dep_variances <- data.frame(matrix(ncol = 4))
+
+i<-2
+
+for (i in (1+lag_order):length(month_list)){
+  df <- as.data.frame(t(data_for_pls %>% 
+                          filter(Date == month_list[i]) %>% 
+                          filter(Variable %in% c(var_list_short, "returns_pls")) %>% 
+                          select(-c(Date, Variable)))) %>%
+    `colnames<-`(c(var_list_short, "returns_pls")) %>% 
+    mutate_all(scale)
+  pls_proba <- plsr(returns_pls ~ DCoVaR + MES + SRISK + SpilloverFrom, ncomp = 4, data = df, validation = "LOO")
+  loadings_pls_firstcomp <- rbind(loadings_pls_firstcomp, as.numeric(t(pls_proba$loadings[,1])))
+  loadings_pls_secondcomp <- rbind(loadings_pls_secondcomp, as.numeric(t(pls_proba$loadings[,2])))
+  scores_pls_firstcomp <- rbind(scores_pls_firstcomp, as.numeric(t(pls_proba$scores[,1])))
+  scores_pls_secondcomp <- rbind(scores_pls_secondcomp, as.numeric(t(pls_proba$scores[,2])))
+  exp_pls_indep_variances <- rbind(exp_pls_indep_variances, explvar(pls_proba)/100)
+  exp_pls_dep_variances <- rbind(exp_pls_dep_variances, drop(R2(pls_proba, estimate = "train", intercept = FALSE)$val))
+}
+
+month_list <- month_list[1:(length(month_list)-lag_order)]
+
+loadings_pls_firstcomp <- cbind(loadings_pls_firstcomp[2:nrow(loadings_pls_firstcomp),] %>% `colnames<-`(var_list_short), Date = month_list)
+loadings_pls_secondcomp <- cbind(loadings_pls_secondcomp[2:nrow(loadings_pls_secondcomp),] %>% `colnames<-`(var_list_short), Date =month_list)
+scores_pls_firstcomp <- cbind(scores_pls_firstcomp[2:nrow(scores_pls_firstcomp),] %>% `colnames<-`(inst_analysed), Date = month_list)
+scores_pls_secondcomp <- cbind(scores_pls_secondcomp[2:nrow(scores_pls_secondcomp),] %>% `colnames<-`(inst_analysed), Date = month_list)
+exp_pls_indep_variances <- exp_pls_indep_variances %>% filter(!is.na(X1)) %>% `colnames<-`(c("PLSC_1", "PLSC_2", "PLSC_3", "PLSC_4"))
+exp_pls_dep_variances <- exp_pls_dep_variances %>% filter(!is.na(X1)) %>% `colnames<-`(c("PLSC_1", "PLSC_2", "PLSC_3", "PLSC_4"))
+cum_variances_pls <- as.data.frame(matrixStats::rowCumsums(as.matrix(exp_pls_indep_variances))) %>% `colnames<-`(c("PLSC_1", "PLSC_2", "PLSC_3", "PLSC_4"))
+```
+
+
+```{r from_pca_pls_scores_to_rankings}
+pca_scores <- bind_rows(scores_firstcomp_month, scores_secondcomp_month, .id = 'Component') %>% relocate(c("Component", "Date", inst_analysed)) %>% rename(Variable = Component) %>% mutate(Variable = paste("PCA", Variable, sep = "_"))
+
+pca_scores_ranking <- as.data.frame(matrix(ncol = nr_inst))
+
+for (i in 1:nrow(pca_scores)){
+  pca_scores_ranking <- rbind(pca_scores_ranking, (nr_inst-rank(pca_scores[i,3:(nr_inst+2)], ties.method = "min")+1))
+}
+
+pca_scores_ranking <- 1-(pca_scores_ranking/(1+length(inst_analysed)))
+pca_scores_ranking <- cbind(pca_scores[,1:2], pca_scores_ranking[-1,])
+colnames(pca_scores_ranking) <- c("Variable", "Date", inst_analysed)
+
+pls_scores <- bind_rows(scores_pls_firstcomp, scores_pls_secondcomp, .id = 'Component') %>% relocate(c("Component", "Date", inst_analysed)) %>% rename(Variable = Component) %>% mutate(Variable = paste("PLS", Variable, sep = "_"))
+
+pls_scores_ranking <- as.data.frame(matrix(ncol = nr_inst))
+
+for (i in 1:nrow(pls_scores)){
+  pls_scores_ranking <- rbind(pls_scores_ranking, (nr_inst-rank(pls_scores[i,3:(nr_inst+2)], ties.method = "min")+1))
+}
+
+
+pls_scores_ranking <- 1-(pls_scores_ranking/(1+length(inst_analysed)))
+pls_scores_ranking <- cbind(pls_scores[,1:2], pls_scores_ranking[-1,])
+colnames(pls_scores_ranking) <- c("Variable", "Date", inst_analysed)
+```
+
+```{r get_deviation_from_pca_pls}
+deviations_PCA <- as.data.frame(matrix(ncol = 3))
+colnames(deviations_PCA) <- c("Date", "y", "inst_analysed")
+
+for (i in 1:length(month_list)){
+  deviations_PCA <- as.data.frame(t(all_data_ranking_monthly %>% 
+                                      filter(Date == month_list[i]) %>% 
+                                      filter(Variable %in% var_list_short) %>% 
+                                      rbind(.,pca_scores_ranking %>% filter(Variable == "PCA_1", Date == month_list[i])) %>% 
+                                      select(-Date))) %>% 
+    row_to_names(., row_number = 1) %>%
+    mutate_if(is.character, as.numeric) %>% 
+    mutate_at(vars(-matches("PCA_1")), list(dif = ~ . - PCA_1)) %>% 
+    select(ends_with("dif")) %>% 
+    rowwise() %>% 
+    mutate(y = sqrt(sum(c_across("DCoVaR_dif":"SRISK_dif")^2)/4), Date = month_list[i]) %>% 
+    select(Date, y) %>% 
+    cbind(., inst_analysed) %>% 
+    rbind(deviations_PCA, .)
+}
+
+deviations_PCA %<>% 
+  filter(!is.na(y)) %>% 
+  reshape(., idvar = "Date", timevar = "inst_analysed", direction = "wide") %>% 
+  mutate(Variable = "DEV_PCA", Date = as.Date(Date,  origin = "1970-01-01")) %>% 
+  relocate(Variable, .before = Date) %>% 
+  `colnames<-`(c("Variable", "Date", inst_analysed))
+
+
+deviations_pls <- as.data.frame(matrix(ncol = 3))
+colnames(deviations_pls) <- c("Date", "y", "inst_analysed")
+
+for (i in 1:length(month_list)){
+  deviations_pls <- as.data.frame(t(all_data_ranking_monthly %>% 
+                                      filter(Date == month_list[i]) %>% 
+                                      filter(Variable %in% var_list_short) %>% 
+                                      rbind(.,pls_scores_ranking %>% filter(Variable == "PLS_1", Date == month_list[i])) %>% 
+                                      select(-Date))) %>% 
+    row_to_names(., row_number = 1) %>%
+    mutate_if(is.character, as.numeric) %>% 
+    mutate_at(vars(-matches("PLS_1")), list(dif = ~ . - PLS_1)) %>% 
+    select(ends_with("dif")) %>% 
+    rowwise() %>% 
+    mutate(y = sqrt(sum(c_across("DCoVaR_dif":"SRISK_dif")^2)/4), Date = month_list[i]) %>% 
+    select(Date, y) %>% 
+    cbind(., inst_analysed) %>% 
+    rbind(deviations_pls, .)
+}
+
+deviations_pls %<>% 
+  filter(!is.na(y)) %>% 
+  reshape(., idvar = "Date", timevar = "inst_analysed", direction = "wide") %>% 
+  mutate(Variable = "DEV_PLS", Date = as.Date(Date,  origin = "1970-01-01")) %>% 
+  relocate(Variable, .before = Date) %>% 
+  `colnames<-`(c("Variable", "Date", inst_analysed))
+```
+
+
+```{r deviations_through_periods}
+
+deviations_list <- data.frame("country" = c("US", "EU", "US", "EU"), "Variable" = c("PCA", "PCA", "PLS", "PLS"))
+
+for (i in l){
+  deviations_list <- left_join(deviations_list, rbind(cbind(country = "US", Variable = "PCA", deviations_PCA %>% 
+    filter(Date %in% i & Date %in% month_list) %>% 
+    summarise_at(inst_analysed[1:14], mean) %>% 
+     mutate(mean = rowMeans(across(where(is.numeric)))) %>% 
+    select(mean)),
+    cbind(country = "EU", Variable = "PCA", deviations_PCA %>% 
+    filter(Date %in% i & Date %in% month_list) %>% 
+    summarise_at(inst_analysed[15:28], mean) %>% 
+     mutate(mean = rowMeans(across(where(is.numeric)))) %>% 
+    select(mean)),
+    cbind(country = "US", Variable = "PLS", deviations_pls %>% 
+    filter(Date %in% i & Date %in% month_list) %>% 
+    summarise_at(inst_analysed[1:14], mean) %>% 
+     mutate(mean = rowMeans(across(where(is.numeric)))) %>% 
+    select(mean)),
+    cbind(country = "EU", Variable = "PLS", deviations_pls %>% 
+    filter(Date %in% i & Date %in% month_list) %>% 
+    summarise_at(inst_analysed[15:28], mean) %>% 
+     mutate(mean = rowMeans(across(where(is.numeric)))) %>% 
+    select(mean))), by = c("country", "Variable"))
+}
+
+deviations_list %<>% `colnames<-`(c("country", "Variable", "date_list", "first_chill_period", "pre_crisis_period", "crisis_period", "debt_crisis_period", "second_chill_period")) %>% arrange(desc(date_list))
+
+xtable::xtable(deviations_list)
+  
+
+```
+
+```{r from_deviations_to_rankings}
+
+deviations_pca_ranking <- as.data.frame(matrix(ncol = nr_inst))
+
+for (i in 1:nrow(deviations_PCA)){
+  deviations_pca_ranking <- rbind(deviations_pca_ranking, (nr_inst-rank(deviations_PCA[i,3:(nr_inst+2)], ties.method = "min")+1))
+}
+
+deviations_pca_ranking <- 1-(deviations_pca_ranking/(1+length(inst_analysed)))
+deviations_pca_ranking <- cbind(deviations_PCA[,1:2], deviations_pca_ranking[-1,])
+colnames(deviations_pca_ranking) <- c("Variable", "Date", inst_analysed)
+
+
+deviations_pls_ranking <- as.data.frame(matrix(ncol = nr_inst))
+
+for (i in 1:nrow(deviations_pls)){
+  deviations_pls_ranking <- rbind(deviations_pls_ranking, (nr_inst-rank(deviations_pls[i,3:(nr_inst+2)], ties.method = "min")+1))
+}
+
+deviations_pls_ranking <- 1-(deviations_pls_ranking/(1+length(inst_analysed)))
+deviations_pls_ranking <- cbind(deviations_pls[,1:2], deviations_pls_ranking[-1,])
+colnames(deviations_pls_ranking) <- c("Variable", "Date", inst_analysed)
+
+```
+
+
+
+
+
+```{r calc_correlation_between_variables}
+
+#----------------------------------------------------------
+#Spearman correlation between rankings, DAILY
+
+#Frist, adding Naive column
+all_data_pca_pls_ranking <- rbind(
+  all_data_ranking_monthly %>% 
+    filter(Variable %in% var_list_short) %>% 
+    group_by(Date) %>% 
+    summarise_at(inst_analysed, mean) %>% 
+    add_column(Variable = "Naive", .before = "Date") %>% 
+    rbind(., all_data_ranking_monthly),
+  pca_scores_ranking, pls_scores_ranking, deviations_pca_ranking, deviations_pls_ranking, returns_pls_ranking)
+
+all_vars_pca_pls <- c(var_list_short, "PCA_1", "PLS_1", "DEV_PCA", "DEV_PLS", "returns_pls")
+
+for (i in 1:length(month_list)){
+  transpose_ranking_matrix <- t(all_data_pca_pls_ranking %>% filter(Date == month_list[i], Variable %in% all_vars_pca_pls) %>% select(inst_analysed)) %>% `colnames<-`(all_vars_pca_pls)
+  m <- cor(transpose_ranking_matrix,  method = "spearman")
+  m[upper.tri(m, diag = TRUE)] <- NA
+  if (i == 1){
+    corr_df <- as.double(t(c(m)))
+  } else {
+    corr_df <- rbind(corr_df, as.double(t(c(m))))
+  }
+}
+
+col_v <- as.vector( m %>% as.data.frame %>% tibble::rownames_to_column() %>% tidyr::pivot_longer(-rowname) %>% mutate(colnames = paste(rowname, name, sep = ".")) %>% select(colnames))
+
+corr_df %<>%  data.frame()
+corr_df <- cbind(Date = month_list, corr_df)
+colnames(corr_df) <- c("Date", t(col_v))
+corr_df <- corr_df[colSums(!is.na(corr_df)) > 0]
+
+
+library(matrixStats)
+
+
+correl_quartiles <- data.frame(Medians = colQuantiles(as.matrix(corr_df[,-1]), na.rm= TRUE)[,3], first_qrt = colQuantiles(as.matrix(corr_df[,-1]), na.rm= TRUE)[,2], third_qrt = colQuantiles(as.matrix(corr_df[,-1]), na.rm= TRUE)[,4])
+
+
+
+```
+
+```{r calc_rank_volatility}
+
+variances_list <- data.frame(matrix(nrow = 9))
+
+#selecting a timeframe
+for (i in l){
+  variances_list <- all_data_pca_pls_ranking %>% 
+    filter(Date %in% i & Date %in% month_list) %>% 
+    filter(Variable %in% c(var_list_short, "Naive", "PCA_1", "PLS_1", "DEV_PCA", "DEV_PLS")) %>% 
+    #filter(Date > "2007-08-01"& Date < "2009-09-01") %>% 
+    group_by(Variable) %>% 
+    summarise_at(inst_analysed,sd) %>% 
+    ungroup() %>% 
+    rowwise(Variable) %>% 
+    mutate(m = mean(c_across(inst_analysed[1]: inst_analysed[nr_inst]))*100) %>% 
+    select(m) %>% 
+    cbind(variances_list, .)#%>% 
+  #arrange(desc(m)) %>% 
+  #pull(m)
+}
+
+variances_list <- variances_list[!duplicated(as.list(variances_list)) & !is.na(as.list(variances_list))]
+variances_list %<>% `colnames<-`(c("NA", "Variable", "date_list", "first_chill_period", "pre_crisis_period", "crisis_period", "pre_debt_crisis_period", "debt_crisis_period", "second_chill_period")) %>% select(-"NA") %>% arrange(desc(date_list))
+
+xtable::xtable(variances_list)
+xtable::xtable(correl_quartiles %>% arrange(desc(Medians)))
+xtable::xtable(turnover_at_top)
+
+```
+
+```{r top_25_turnover_by_year}
+
+new_data <- all_data_pca_pls_ranking %>% 
+  filter(Variable %in% all_vars_pca_pls) %>% 
+  filter(month(Date) == 12) %>% 
+  reshape2::melt(., id.vars = c("Variable", "Date")) %>% 
+  reshape(., idvar = c("Variable", "variable"), timevar = "Date", direction = "wide")
+
+top_10 <- data.frame(matrix(ncol = 4))
+
+for (i in names(new_data)[3:ncol(new_data)]){
+  top_10 <- rbind(top_10, 
+                  setNames(tibble(i, new_data %>% 
+                    arrange_at(i, desc) %>% 
+                    group_by(., Variable) %>% 
+                    slice(1:10) %>% 
+                    select(Variable, variable, i) %>% 
+                      mutate(Variable = paste0(Variable, seq(1,10)))),
+                    names(top_10))
+  )
+}
+
+g<-data.frame(matrix(ncol = 3))
+
+for (i in all_vars_pca_pls){
+  data_i <- top_10 %>% 
+  select(-X4) %>% 
+  filter(!is.na(X1)) %>% 
+  reshape(., idvar = "X2", timevar = "X1", direction ="wide") %>% 
+  filter(grepl(i, X2)) %>% 
+  select(-X2)
+  
+  for (k in (2:ncol(data_i)-1)){
+      g <- rbind(g, setNames(tibble(i, names(data_i)[k+1], sum(data_i[,k+1] %in% data_i[,k])), names(g)))
+    }
+  }
+
+turnover_at_top <- g %>% 
+  filter(!is.na(X1)) %>% 
+  reshape(idvar = "X2", timevar = "X1", direction = "wide") %>% 
+  rename(Date = X2) %>% 
+  mutate(Date = gsub("X3.value.", "", Date)) %>% 
+  `colnames<-`(gsub("X3.", "", names(.))) %>% 
+  rbind(., Average = c(NA, colMeans(.[, -1])))
+
+xtable::xtable(turnover_at_top)
+
+```
+
+
+
+
+
+
+```{r calc_precrisis_to_crisis_regression}
+#lag_order <- 4
+
+
+#grouping by periods
+df <- all_data_pca_pls_ranking %>% 
+  mutate(period = case_when(
+    Date < "2006-01-01" ~ "first_chill_period",
+    Date >= "2006-01-01" & Date < "2007-07-01" ~ "pre_crisis_period",
+    Date >= "2007-07-01" & Date < "2009-07-01" ~ "crisis_period",
+    Date >= "2009-07-01" & Date < "2009-11-01" ~ "pre_debt_crisis_period",
+    Date >= "2009-11-01" & Date < "2012-08-01" ~ "debt_crisis_period",
+    Date >= "2012-08-01" ~ "second_chill_period",
+    TRUE ~ "else"
+  )) %>% 
+  select(-Date) %>% 
+  group_by(period, Variable) %>% 
+  mutate_if(is.numeric, mean) %>% 
+  unique() %>% 
+  reshape2::melt(
+    .,id.vars=c("period", "Variable")
+  ) %>% 
+  reshape(., idvar = c("period", "variable"), timevar = "Variable", direction = "wide")
+
+df_A <- df %>% 
+  filter(period %in% c("pre_crisis_period")) %>% select(-value.returns_pls) %>% 
+  cbind(., df %>% filter(period %in% c("crisis_period")) %>% select(value.returns_pls))
+
+
+models_out <- tibble(
+  formula = paste('value.returns_pls ~', c("value.DCoVaR", 
+                                           "value.SRISK",
+                                           "value.MES", 
+                                           "value.SpilloverFrom", 
+                                           "value.Naive", 
+                                           "value.PCA_1", 
+                                           "value.PLS_1", 
+                                           "value.DEV_PCA", 
+                                           "value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom",
+                                           "value.DCoVaR + value.SRISK + value.MES+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1 +value.DEV_PCA",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1+value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom + value.PCA_1 + value.DEV_PCA + value.PLS_1 + value.DEV_PLS")), 
+  model = map(
+    .x = formula, 
+    .f = function(x) lm(x, data = df_A))
+)
+
+
+stargazer(models_out$model, type = 'latex', single.row = TRUE, report = "vc*p")
+
+#From any other period to the next
+
+
+df_B <- df %>% 
+  filter(period %in% c("crisis_period", "debt_crisis_period")) %>% select(-value.returns_pls) %>% 
+  cbind(., df %>% filter(period %in% c("pre_debt_crisis_period", "second_chill_period")) %>% select(value.returns_pls))
+
+
+models_out <- tibble(
+  formula = paste('value.returns_pls ~', c("value.DCoVaR", 
+                                           "value.SRISK",
+                                           "value.MES", 
+                                           "value.SpilloverFrom", 
+                                           "value.Naive", 
+                                           "value.PCA_1", 
+                                           "value.PLS_1", 
+                                           "value.DEV_PCA", 
+                                           "value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1 +value.DEV_PCA",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1+value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom + value.PCA_1 + value.DEV_PCA + value.PLS_1 + value.DEV_PLS")),  
+  model = map(
+    .x = formula, 
+    .f = function(x) lm(x, data = df_B))
+)
+
+stargazer(models_out$model, type = 'latex')
+
+#tstats <- coef(model) / sqrt(diag(vcov(model)))
+
+# if (i == 1){
+#  regression_coefficients <- model$coefficients
+#  regression_tstats <- tstats
+#  regression_pvalues <- summary(model)$coefficients[,4]
+#} else {
+#  regression_coefficients <- rbind(regression_coefficients, model$coefficients)
+#  regression_tstats <- rbind(regression_tstats, tstats)
+#  regression_pvalues <- rbind(regression_pvalues, summary(model)$coefficients[,4])
+#}
+#}
+
+# regression_coefficients %<>% as.data.frame()# %>%  add_column(Date = month_list[1:(length(month_list)-lag_order)], .before = "(Intercept)") %>% `rownames<-`(NULL)
+# regression_tstats %<>% as.data.frame()# %>%  add_column(Date = month_list[1:(length(month_list)-lag_order)], .before = "(Intercept)") %>% `rownames<-`(NULL)
+# regression_pvalues %<>% as.data.frame()# %>%  add_column(Date = month_list[1:(length(month_list)-lag_order)], .before = "(Intercept)") %>% `rownames<-`(NULL)
+# 
+# 
+# regression_pvalues %>% select(-"(Intercept)") %>% reshape2::melt(id.vars = "Date") %>% 
+#   filter(value < 0.05) %>% 
+#   #filter(Date< "2010-02-01" & Date > "2007-02-01") %>% 
+#   ggplot(aes(x = Date, y = variable)) +
+#   annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-09-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+#   geom_tile(aes(fill = value))
+#coord_fixed(ratio = 100)
+
+
+```
+
+
+
+
+```{r calc_periodly_forward_looking_regression}
+#lag_order <- 4
+
+
+#grouping by periods
+df <- rbind(all_data_ranking_monthly %>% 
+    filter(Variable %in% var_list_short) %>% 
+    group_by(Date) %>% 
+    summarise_at(inst_analysed, mean) %>% 
+    add_column(Variable = "Naive", .before = "Date") %>% 
+    rbind(., all_data_ranking_monthly),
+  pca_scores_ranking, pls_scores_ranking, deviations_pca_ranking, deviations_pls_ranking) %>% 
+  rbind(returns_pls_ranking %>% mutate(Date = lag(Date)) %>% filter(!is.na(Date))) %>% 
+  reshape2::melt(
+    .,id.vars=c("Date", "Variable")
+  ) %>% 
+  mutate(period = case_when(
+    Date < "2006-01-01" ~ "first_chill_period",
+    Date >= "2006-01-01" & Date < "2007-07-01" ~ "pre_crisis_period",
+    Date >= "2007-07-01" & Date < "2009-07-01" ~ "crisis_period",
+    Date >= "2009-07-01" & Date < "2009-11-01" ~ "pre_debt_crisis_period",
+    Date >= "2009-11-01" & Date < "2012-08-01" ~ "debt_crisis_period",
+    Date >= "2012-08-01" ~ "second_chill_period",
+    TRUE ~ "else"
+  )) %>% 
+  reshape(., idvar = c("Date", "period", "variable"), timevar = "Variable", direction = "wide")
+
+
+
+df_A <- df %>% 
+  filter(period %in% c("pre_crisis_period"))
+
+
+models_out <- tibble(
+  formula = paste('value.returns_pls ~', c("value.DCoVaR", 
+                                           "value.SRISK",
+                                           "value.MES", 
+                                           "value.SpilloverFrom", 
+                                           "value.Naive", 
+                                           "value.PCA_1", 
+                                           "value.PLS_1", 
+                                           "value.DEV_PCA", 
+                                           "value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1 +value.DEV_PCA",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1+value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom + value.PCA_1 + value.DEV_PCA + value.PLS_1 + value.DEV_PLS")), 
+  model = map(
+    .x = formula, 
+    .f = function(x) lm(x, data = df_A))
+)
+
+
+stargazer(models_out$model, type = 'latex', single.row = TRUE, report = "vc*p")
+
+#From any other period to the next
+
+
+df_B <- df %>% 
+  filter(period %in% c("crisis_period"))
+
+
+models_out <- tibble(
+  formula = paste('value.returns_pls ~', c("value.DCoVaR", 
+                                           "value.SRISK",
+                                           "value.MES", 
+                                           "value.SpilloverFrom", 
+                                           "value.Naive", 
+                                           "value.PCA_1", 
+                                           "value.PLS_1", 
+                                           "value.DEV_PCA", 
+                                           "value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1 +value.DEV_PCA",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1+value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom + value.PCA_1 + value.DEV_PCA + value.PLS_1 + value.DEV_PLS")),  
+  model = map(
+    .x = formula, 
+    .f = function(x) lm(x, data = df_B))
+)
+
+stargazer(models_out$model, type = 'latex', single.row = TRUE, report = "vc*p")
+
+
+
+df_C <- df %>% 
+  filter(period %in% c("pre_debt_crisis_period", "debt_crisis_period"))
+
+
+models_out <- tibble(
+  formula = paste('value.returns_pls ~', c("value.DCoVaR", 
+                                           "value.SRISK",
+                                           "value.MES", 
+                                           "value.SpilloverFrom", 
+                                           "value.Naive", 
+                                           "value.PCA_1", 
+                                           "value.PLS_1", 
+                                           "value.DEV_PCA", 
+                                           "value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1 +value.DEV_PCA",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1+value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom + value.PCA_1 + value.DEV_PCA + value.PLS_1 + value.DEV_PLS")),  
+  model = map(
+    .x = formula, 
+    .f = function(x) lm(x, data = df_C))
+)
+
+stargazer(models_out$model, type = 'latex', single.row = TRUE, report = "vc*p")
+
+
+
+df_D <- df %>% 
+  filter(period %in% c("debt_crisis_period"))
+
+
+models_out <- tibble(
+  formula = paste('value.returns_pls ~', c("value.DCoVaR", 
+                                           "value.SRISK",
+                                           "value.MES", 
+                                           "value.SpilloverFrom", 
+                                           "value.Naive", 
+                                           "value.PCA_1", 
+                                           "value.PLS_1", 
+                                           "value.DEV_PCA", 
+                                           "value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1 +value.DEV_PCA",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1+value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom + value.PCA_1 + value.DEV_PCA + value.PLS_1 + value.DEV_PLS")),  
+  model = map(
+    .x = formula, 
+    .f = function(x) lm(x, data = df_D))
+)
+
+stargazer(models_out$model, type = 'latex', single.row = TRUE, report = "vc*p")
+
+
+
+df_E <- df %>% 
+  filter(period %in% c("first_chill_period", "second_chill_period"))
+
+
+models_out <- tibble(
+  formula = paste('value.returns_pls ~', c("value.DCoVaR", 
+                                           "value.SRISK",
+                                           "value.MES", 
+                                           "value.SpilloverFrom", 
+                                           "value.Naive", 
+                                           "value.PCA_1", 
+                                           "value.PLS_1", 
+                                           "value.DEV_PCA", 
+                                           "value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PCA_1 +value.DEV_PCA",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom+value.PLS_1+value.DEV_PLS",
+                                           "value.DCoVaR + value.SRISK + value.MES +value.SpilloverFrom + value.PCA_1 + value.DEV_PCA + value.PLS_1 + value.DEV_PLS")),  
+  model = map(
+    .x = formula, 
+    .f = function(x) lm(x, data = df_E))
+)
+
+stargazer(models_out$model, type = 'latex', single.row = TRUE, report = "vc*p")
+
+```
+
+
+
+
+```{r calc_rolling_window_forward_regression}
+#Minden időszakban megnézem, hogy az egy hónappal előre jelzés szignifikáns-e
+
+lag_order <- 1
+window_size <- 12
+
+
+returns_pls_lagged <- cbind(Date_lagged = month_list[(lag_order+1):length(month_list)], returns_pls_ranking[1:(nrow(returns_pls)-lag_order),]) %>% select(-Date) %>% rename(Date = Date_lagged) %>% relocate(Variable, .before = Date)
+
+
+df <- all_data_pca_pls_ranking %>% 
+  rbind(returns_pls_lagged) %>% 
+  reshape2::melt(
+    .,id.vars=c("Variable", "Date")
+  ) %>% 
+  reshape(., idvar = c("Date", "variable"), timevar = "Variable", direction = "wide")
+
+
+
+g_all <- data.frame(matrix(ncol = 4))
+for (k in paste0("value.", c("Naive", all_vars_pca_pls), sep = "")){
+  for (i in 1:(length(month_list)-window_size)){
+    model <- lm(value.returns_pls ~ get(k), data = df %>% filter(Date %in% month_list[i:(i+ window_size)]))
+    g <- tibble(sub("value.", "", k), month_list[i], model$coefficients[2], summary(model)$coefficients[2,4])
+    g_all <- rbind(g_all, setNames(g, names(g_all)))
+  }  
+}
+
+g_all %<>% mutate(X2 = as.Date(X2, origin = "1970-01-01")) %>% `colnames<-`(c("Variable", "Date", "Coefficient", "p_value")) %>% filter(!is.na(Date))
+
+g_all %>% 
+  filter(Variable %in% all_vars_pca_pls) %>% 
+  filter(p_value < 0.05) %>% 
+  ggplot(aes(x = Date)) +
+  annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+  annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+  #geom_point(aes(y = Coefficient), color = "blue", size = 1.2) +
+  geom_line(aes(y = p_value), color = "cyan4", alpha = 0.4) +
+  facet_wrap(~ Variable, ncol = 4)
+  
+  
+```
+  
+  
+  
+```{r calc_periodly_rank_regression_for_whole_periods}
+  #Minden időszakban megnézem, hogy az egy hónappal előre jelzés szignifikáns-e
+  
+  first_period <- as.data.frame(month_list) %>% filter(month_list < "2007-08-01" ) %>% pull()
+  second_period <- as.data.frame(month_list) %>% filter(month_list > "2007-08-01" & month_list < "2009-09-01") %>% pull()
+  third_period <- as.data.frame(month_list) %>% filter(month_list > "2009-09-01") %>% pull()
+  #First period
+  x <- as.data.frame(
+    all_data_pca_pls_ranking %>% 
+      filter(Date %in% first_period)
+  ) %>% select(-Date) %>% group_by(Variable) %>% 
+    summarize_if(is.numeric, mean) %>% 
+    reshape2::melt(
+      .,id.vars=c("Variable")
+    ) %>% 
+    reshape(., idvar = c("variable"), timevar = "Variable", direction = "wide")
+  
+  
+  y <- as.data.frame(
+    returns_pls_ranking %>% 
+      filter(Date %in% second_period)
+  ) %>% select(-Date) %>% group_by(Variable) %>% 
+    summarize_if(is.numeric, mean) %>% 
+    reshape2::melt(
+      .,id.vars=c("Variable")
+    ) %>% 
+    reshape(., idvar = c("variable"), timevar = "Variable", direction = "wide")
+  
+  df <- merge(y, x, by = c("variable"))
+  
+  firstmodel <- lm(value.returns_pls ~ value.PCA_1 + value.PLS_1, data = df)
+  summary(firstmodel)
+  regression_firstperiods_coefficients <- firstmodel$coefficients
+  #regression_firstperiods_tstats <- tstats
+  regression_firstperiods_pvalues <- summary(firstmodel)$coefficients[,4]
+  
+  #Second period
+  first_period <- as.data.frame(month_list) %>% filter(month_list < "2007-08-01" ) %>% pull()
+  second_period <- as.data.frame(month_list) %>% filter(month_list > "2007-08-01" & month_list < "2009-09-01") %>% pull()
+  third_period <- as.data.frame(month_list) %>% filter(month_list > "2009-09-01") %>% pull()
+  #First period
+  x <- as.data.frame(
+    all_data_pca_pls_ranking %>% 
+      filter(Date %in% second_period)
+  ) %>% select(-Date) %>% group_by(Variable) %>% 
+    summarize_if(is.numeric, mean) %>% 
+    reshape2::melt(
+      .,id.vars=c("Variable")
+    ) %>% 
+    reshape(., idvar = c("variable"), timevar = "Variable", direction = "wide")
+  
+  
+  y <- as.data.frame(
+    returns_pls_ranking %>% 
+      filter(Date %in% third_period)
+  ) %>% select(-Date) %>% group_by(Variable) %>% 
+    summarize_if(is.numeric, mean) %>% 
+    reshape2::melt(
+      .,id.vars=c("Variable")
+    ) %>% 
+    reshape(., idvar = c("variable"), timevar = "Variable", direction = "wide")
+  
+  df <- merge(y, x, by = c("variable"))
+  
+  secondmodel <- lm(value.returns_pls ~  value.PCA_1 + value.PLS_1, data = df)
+  summary(secondmodel)
+  regression_secondperiods_coefficients <- secondmodel$coefficients
+  #regression_secondperiods_tstats <- tstats
+  regression_secondperiods_pvalues <- summary(secondmodel)$coefficients[,4]
+```
+  
+  
+  
+  
+  
+```{r plot1_init_variables}
+  
+  #Plotting Variable for 4 institutions
+  all_data %>% filter(Variable == "SRISK") %>% select(c("Variable", "Date", inst_analysed)) %>%  reshape2::melt(., id.vars = c("Variable", "Date")) %>% 
+    ggplot(data=., aes(Date, value)) +
+    geom_line(aes(color = variable)) 
+  #scale_x_date(date_breaks = "1 year", 
+  #               date_labels="%Y",
+  #               limits = as.Date(c('2003-04-01','2004-12-31')))
+  
+  
+  data_plot1table1 <- rbind(all_data, pca_scores, pls_scores) %>% filter(Variable %in% var_list_short)
+  data_plot1table2 <- all_data_pca_pls_ranking %>% filter(Variable %in% var_list_short)
+  
+  
+  #Plotting measures for institution, MONTHLY
+  ggplot(data = data_plot1table1 %>% filter(Date %in% month_list) , aes(Date, C)) + 
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line(aes(color=Variable)) +
+    facet_wrap(Variable ~ ., scales = "free_y", nrow=2) +
+    scale_color_brewer(palette = "Dark2") +
+    scale_x_date(date_breaks = "5 year", 
+                 date_labels="%Y",
+                 limits = as.Date(c('2002-04-01','2019-12-31')))
+  
+  
+  
+  #Plotting rankings for institution, MONTHLY
+  ggplot(data = data_plot1table2, aes(Date, C)) + 
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line(aes(color=Variable)) +
+    facet_wrap(Variable ~ ., nrow=2) +
+    #ylim(0,7) +
+    scale_color_brewer(palette = "Dark2") +
+    #scale_y_discrete() +
+    scale_x_date(date_breaks = "5 year", 
+                 date_labels="%Y",
+                 limits = as.Date(c('2002-04-01','2019-12-31')))
+  
+```
+  
+```{r plot4_init_variables}
+  #Nucera Fig. 2 (date: 2007-07-01), scatter plot with R2 values
+  
+  date_to_check <- "2008-12-03"
+  
+  data_plot2table1 <- as.data.frame(t(
+    all_data_ranking %>% 
+      filter(Date == date_to_check, Variable %in% var_list_short) %>% 
+      select(-Date)
+  )) %>% 
+    tibble::rownames_to_column() %>% 
+    row_to_names(row_number = 1) %>% 
+    mutate_if(is.character, as.numeric) %>% 
+    reshape2::melt(id.vars = c("Variable", "SRISK"))
+  
+  
+  formula <- y ~ x
+  ggplot(data_plot2table1, aes(x = SRISK, y = value)) +
+    geom_point(color = RColorBrewer::brewer.pal(n=8,name = "Dark2")[8]) +
+    geom_smooth(method = "lm", formula = formula, color = RColorBrewer::brewer.pal(n=8,name = "Dark2")[2]) +
+    ggpmisc::stat_poly_eq(formula = formula, 
+                          aes(label = paste(..rr.label.., sep = "~~~")), 
+                          parse = TRUE) +
+    facet_wrap(~variable, nrow =  1)
+  
+```
+  
+```{r plot3_pca_loadings}
+  
+  data_plot3table1 <- loadings_firstcomp %>% reshape2::melt(id.vars="Date")
+  data_plot3table2 <- loadings_secondcomp %>% reshape2::melt(id.vars="Date")
+  
+  ggplot(data_plot3table1 %>% filter(Date %in% month_list), aes(x = Date, y = value, colour = variable, group = variable)) + 
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_point() + 
+    facet_wrap(~variable, ncol=2) +
+    #scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    scale_color_brewer(palette = "Dark2")
+  
+  #Histograms of loadings
+  ggplot(data_plot3table1 %>%  filter(Date %in% month_list), aes(x=Date, y = value)) + 
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line(aes( color = variable)) +
+    scale_color_brewer(palette = "Dark2") +
+    facet_wrap(.~variable, ncol = 2) 
+
+  ggplot(data_plot3table1, aes(x=value)) + 
+    geom_histogram(aes(y=..density.., fill = variable)) +
+    geom_density(size=1) +
+    scale_fill_brewer(palette = "Dark2") +
+    facet_wrap(variable ~ ., nrow = 2) +
+    theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+    
+  
+  
+  ggplot(data_plot3table2, aes(x=value)) + 
+    geom_histogram(aes(y=..density.., fill = variable)) +
+    geom_density(size=1) +
+    scale_fill_brewer(palette = "Dark2") +
+    facet_wrap( variable ~ ., nrow = 2) +
+    theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+```
+  
+```{r plot7_variances}
+  data_plot7table1 <- exp_variances %>% filter(Date %in% month_list) %>% reshape2::melt(id.vars="Date")
+  data_plot7table2 <- cum_variances %>% cbind(., Date = date_list) %>% filter(Date %in% month_list) %>% reshape2::melt(id.vars="Date")
+  
+  
+  ggplot(data_plot7table1, aes(x=Date, y = value,colour=variable,group=variable)) +
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line() +
+    scale_color_brewer(palette = "Dark2")
+  
+  ggplot(data_plot7table2, aes(x=Date, y = value,colour=variable,group=variable)) +
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line() +
+    scale_color_brewer(palette = "Dark2") +
+    ylim(0,NA)
+  
+  
+  #plot monthly variances
+  
+  
+  data_plot7table3 <- exp_variances_month %>% reshape2::melt(id.vars="Date")
+  data_plot7table4 <- cum_variances_month %>% cbind(., Date = month_list) %>% reshape2::melt(id.vars="Date")
+  
+  
+  ggplot(data_plot7table3, aes(x=Date, y = value,colour=variable,group=variable)) +
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line() +
+    scale_color_brewer(name = "Principal Component", palette = "Dark2") +
+    labs(x = "", y = "Ratio of variance explained")
+  
+  ggplot(data_plot7table4, aes(x=Date, y = value,colour=variable,group=variable)) +
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line() +
+    ylim(0,NA) +
+    scale_color_brewer(palette = "Dark2")
+```
+  
+```{r plot8_pls_loadings}
+  data_plot8table1 <- loadings_pls_firstcomp %>% reshape2::melt(id.vars="Date")
+  data_plot8table2 <- loadings_pls_secondcomp %>% reshape2::melt(id.vars="Date")
+  
+  ggplot(data_plot8table1 %>% filter(Date %in% month_list), aes(x = Date, y = value, colour = variable, group = variable)) + 
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line() + 
+    geom_smooth() +
+    #scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    facet_wrap(variable~., ncol = 2) +
+    scale_color_brewer(palette = "Dark2")+
+    theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+  
+  ggplot(data_plot8table1, aes(x=value)) + 
+    geom_histogram(aes(y=..density.., fill = variable)) +
+    geom_density(size=1) +
+    facet_wrap( variable ~ ., nrow = 2) +
+    scale_fill_brewer(palette = "Dark2")+
+    theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+  
+  
+  ggplot(data_plot8table2, aes(x=value)) + 
+    geom_histogram(aes(y=..density.., fill = variable)) +
+    geom_density(size=1) +
+    facet_wrap( variable ~ ., nrow = 2) +
+    scale_fill_brewer(palette = "Dark2")+
+    theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+```
+  
+```{r plot7_variances_pls}
+  data_plot7table1 <- exp_pls_indep_variances %>% cbind(., Date = month_list) %>% reshape2::melt(id.vars="Date")
+  data_plot7table2 <- exp_pls_dep_variances %>% cbind(., Date = month_list) %>% reshape2::melt(id.vars="Date")
+  data_plot7table3 <- cum_variances_pls %>% cbind(., Date = month_list) %>% reshape2::melt(id.vars="Date")
+  
+  
+  ggplot(data_plot7table1, aes(x=Date, y = value,colour=variable,group=variable)) +
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line()+
+    geom_smooth()+
+    scale_color_brewer(palette = "Dark2")
+  
+  ggplot(data_plot7table2 %>% filter(variable =="PLSC_1"), aes(x=Date, y = value,colour=variable,group=variable)) +
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line()+
+    scale_color_brewer(palette = "Dark2")
+  
+  ggplot(data_plot7table3, aes(x=Date, y = value,colour=variable,group=variable)) +
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line() +
+    ylim(0,NA) +
+    scale_color_brewer(palette = "Dark2")
+
+```
+  
+  
+```{r plot9_correlation}
+  
+  #plotting
+  data_plot9table2 <- reshape2::melt(corr_df %>% filter(Date %in% month_list),  id.vars = 'Date')
+  ggplot(data = data_plot9table2 %>% filter(!grepl(paste(c("PCA","PLS", "returns_pls"), collapse = "|"), variable)), aes(Date, value)) + 
+    annotate("rect", xmin = as.Date("2007-08-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-11-01"), xmax = as.Date("2012-08-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line(aes(colour = variable)) +
+    geom_hline(yintercept = 0) +
+    facet_wrap(variable ~ ., nrow = 2) +
+    scale_x_date(date_breaks = "5 year", date_labels = "%Y") +
+    scale_color_brewer(palette = "Dark2")+
+    theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+```
+  
+```{r plot_deviations}
+  coeff <- 1
+  deviations_pls %>% 
+    reshape2::melt(id.vars = c("Variable", "Date")) %>% 
+    reshape(idvar = c("Date", "variable"), timevar = "Variable", direction = "wide") %>% 
+    ggplot(aes(x = Date, y = value.DEV_PLS)) +
+    annotate("rect", xmin = as.Date("2006-01-01"), xmax = as.Date("2007-07-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    annotate("rect", xmin = as.Date("2009-07-01"), xmax = as.Date("2009-11-01"), ymin = -Inf, ymax = Inf, alpha = .2) +
+    geom_line( aes(y=value.DEV_PLS), stat="identity", size=.1, fill="blue", color="black", alpha=.4) + 
+    facet_wrap(~ variable, ncol = 6)
+  
+  returns_pls %>% 
+    ggplot(aes(x = Date, y = JPM)) +
+    geom_line()
+  
+```
+  
+  
